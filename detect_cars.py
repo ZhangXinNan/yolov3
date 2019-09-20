@@ -1,6 +1,8 @@
 import argparse
+import time
+import logging
 from sys import platform
-
+import torch
 from models import *  # set ONNX_EXPORT in models.py
 from utils.datasets import *
 from utils.utils import *
@@ -63,12 +65,17 @@ def get_args():
     parser.add_argument('--img-size', type=int, default=416, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
     parser.add_argument('--nms-thres', type=float, default=0.5, help='iou threshold for non-maximum suppression')
-    parser.add_argument('--device', default='1', help='device id (i.e. 0 or 0,1) or cpu')
+    parser.add_argument('--device', default='0', help='device id (i.e. 0 or 0,1) or cpu')
+    # parser.add_argument('--pid', default=0, type=int)
     opt = parser.parse_args()
     return opt
 
 
 def main(opt):
+    str_time = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    logging.basicConfig(level=logging.INFO,
+        filename=str_time + '_detect_car.log',
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     save_img = True
     print(opt)
     detector = DetectorYolo(opt.device, opt.img_size, opt.cfg, opt.weights, opt.data)
@@ -78,6 +85,9 @@ def main(opt):
     for line in fi:
         line = line.strip()
         arr = line.split('\t')
+        # label = int(arr[1])
+        # if opt.pid >= 0 and label % 10 != opt.pid:
+        #     continue
         if len(arr) != 3:
             print(line, arr, 'len(arr) != 3')
             fo.write(line + '\n')                   # 如果列数多于3个，则表示检测过了，不需要再进行检测
@@ -86,22 +96,30 @@ def main(opt):
             print(arr[0], ' is not a file')
             continue
         if save_img:
-            # a = os.path.split(arr[0])
-            a = arr[0].split('/')
-            lib_name = a[-3]
-            sub_dir = a[-2]
-            filename = a[-1]
-            out_dir = os.path.join(opt.out_dir, lib_name, sub_dir)
-            if not os.path.isdir(out_dir):
-                os.makedirs(out_dir)
-            save_path = os.path.join(out_dir, filename)
+            a = arr[0].split(os.path.sep)
+            # productlib_name.subdir_name.filename
+            new_filename = a[-3] + '.' + a[-2] + '.' + a[-1]
+            # autohome_subdir_name
+            new_out_dir = os.path.join(opt.out_dir, '.'.join(arr[2][1:-1].split(',')).replace(' ', ''))
+            if not os.path.isdir(new_out_dir):
+                os.makedirs(new_out_dir)
+            save_path = os.path.join(new_out_dir, new_filename)
             if os.path.isfile(save_path):
                 # 文件已经存在了，表示已经保存过检测结果了，也忽略继续
                 continue
         img = cv2.imread(arr[0])
+        if img is None:
+            logging.warning(arr[0] + ' imread error !!!')
+            continue
         h, w = img.shape[:2]
         with torch.no_grad():
-            det = detector.detect_objs(img).numpy()
+            det = detector.detect_objs(img)
+            if det is None:
+                logging.info(arr[0] + ' det is None !!!')
+                continue
+            if torch.cuda.is_available():
+                det = det.cpu()
+            det = det.numpy()
             print('detect_objs : ', det, type(det))
             det = check_car(det)
             print("detect_cars : ", det, type(det))
@@ -114,7 +132,7 @@ def main(opt):
 
         ret = get_best_car(det, w, h)
         print('get_best_car : ', ret, type(ret))
-        arr.insert(2, '[' + ','.join([str(x) for x in ret]) + ']')
+        arr.insert(2, '[' + ','.join([str(x) if i == 4 else str(int(x)) for i, x in enumerate(ret)]) + ']')
         fo.write('\t'.join(arr) + '\n')
         if save_img:
             x1, y1, x2, y2 = ret[:4]
@@ -126,4 +144,5 @@ def main(opt):
 
 
 if __name__ == '__main__':
+    # logger = logging.getLogger(__name__)
     main(get_args())

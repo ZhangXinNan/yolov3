@@ -51,7 +51,8 @@ class DetectorYolo:
         s += '%gx%g ' % img.shape[2:]  # print string
         # if det is not None and len(det):
         if det is None or len(det)==0:
-            raise Exception #,"det error !!!"
+            # raise Exception #,"det error !!!"
+            return None
         # Rescale boxes from img_size to im0 size
         det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
         # Print results
