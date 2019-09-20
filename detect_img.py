@@ -27,12 +27,11 @@ class DetectorYolo:
         # Get classes and colors
         self.classes = load_classes(parse_data_cfg(data)['names'])
         self.colors = [[random.randint(0, 255) for _ in range(3)] for _ in range(len(self.classes))]
+        self.conf_thres = 0.3
+        self.nms_thres = 0.5
 
-    def detect_objs(self, opt, im0s, save_img=True):
-        # img_size = opt.img_size  # (320, 192) or (416, 256) or (608, 352) for (height, width)
-        save_path, path = opt.output, opt.source
-        # im0s = cv2.imread(path)
-        img, *_ = letterbox(im0s, new_shape=self.img_size)
+    def detect_objs(self, im0):
+        img, *_ = letterbox(im0, new_shape=self.img_size)
         # Normalize RGB
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
         img = np.ascontiguousarray(img, dtype=np.float32)  # uint8 to fp16/fp32
@@ -46,10 +45,9 @@ class DetectorYolo:
             img = img.unsqueeze(0)
         pred, _ = self.model(img)
 
-        # for i, det in enumerate(non_max_suppression(pred, opt.conf_thres, opt.nms_thres)):  # detections per image
-        dets = non_max_suppression(pred, opt.conf_thres, opt.nms_thres)
+        dets = non_max_suppression(pred, self.conf_thres, self.nms_thres)
         det = dets[0]
-        p, s, im0 = path, '', im0s
+        s = ''
         s += '%gx%g ' % img.shape[2:]  # print string
         # if det is not None and len(det):
         if det is None or len(det)==0:
@@ -83,7 +81,7 @@ def get_args():
     parser.add_argument('--img-size', type=int, default=416, help='inference size (pixels)')
     parser.add_argument('--conf-thres', type=float, default=0.3, help='object confidence threshold')
     parser.add_argument('--nms-thres', type=float, default=0.5, help='iou threshold for non-maximum suppression')
-    parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
+    # parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
     # parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
     parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
     opt = parser.parse_args()
@@ -95,7 +93,7 @@ def main(opt):
     dector = DetectorYolo(opt.device, opt.img_size, opt.cfg, opt.weights, opt.data)
     if os.path.isfile(opt.source):
         img = cv2.imread(opt.source)
-        det = dector.detect_objs(opt, img)
+        det = dector.detect_objs(img)
         img_show = dector.plot_boxes(img, det)
         cv2.imwrite(opt.output, img_show)
     elif os.path.isdir(opt.source):
@@ -110,7 +108,7 @@ def main(opt):
             print(img_path)
             print(save_path)
             img = cv2.imread(img_path)
-            det = dector.detect_objs(opt, img)
+            det = dector.detect_objs(img)
             img_show = dector.plot_boxes(img, det)
             cv2.imwrite(save_path, img_show)
 
