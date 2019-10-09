@@ -41,19 +41,6 @@ def load_classes(path):
     return list(filter(None, names))  # filter removes empty strings (such as last line)
 
 
-def model_info(model, report='summary'):
-    # Plots a line-by-line description of a PyTorch model
-    n_p = sum(x.numel() for x in model.parameters())  # number parameters
-    n_g = sum(x.numel() for x in model.parameters() if x.requires_grad)  # number gradients
-    if report is 'full':
-        print('%5s %40s %9s %12s %20s %10s %10s' % ('layer', 'name', 'gradient', 'parameters', 'shape', 'mu', 'sigma'))
-        for i, (name, p) in enumerate(model.named_parameters()):
-            name = name.replace('module_list.', '')
-            print('%5g %40s %9s %12g %20s %10.3g %10.3g' %
-                  (i, name, p.requires_grad, p.numel(), list(p.shape), p.mean(), p.std()))
-    print('Model Summary: %g layers, %g parameters, %g gradients' % (len(list(model.parameters())), n_p, n_g))
-
-
 def labels_to_class_weights(labels, nc=80):
     # Get class weights (inverse frequency) from training labels
     ni = len(labels)  # number of images
@@ -224,19 +211,24 @@ def compute_ap(recall, precision):
     # Returns
         The average precision as computed in py-faster-rcnn.
     """
+
     # Append sentinel values to beginning and end
-    mrec = np.concatenate(([0.], recall, [1.]))
+    mrec = np.concatenate(([0.], recall, [min(recall[-1] + 1E-3, 1.)]))
     mpre = np.concatenate(([0.], precision, [0.]))
 
     # Compute the precision envelope
     for i in range(mpre.size - 1, 0, -1):
         mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
 
-    # Calculate area under PR curve, looking for points where x axis (recall) changes
-    i = np.where(mrec[1:] != mrec[:-1])[0]
+    # Integrate area under curve
+    method = 'interp'  # methods: 'continuous', 'interp'
+    if method == 'interp':
+        x = np.linspace(0, 1, 101)  # 101-point interp (COCO)
+        ap = np.trapz(np.interp(x, mrec, mpre), x)  # integrate
+    else:  # 'continuous'
+        i = np.where(mrec[1:] != mrec[:-1])[0]  # points where x axis (recall) changes
+        ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])  # area under curve
 
-    # Sum (\Delta recall) * prec
-    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
     return ap
 
 
@@ -268,7 +260,7 @@ def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False):
     if GIoU:  # Generalized IoU https://arxiv.org/pdf/1902.09630.pdf
         c_x1, c_x2 = torch.min(b1_x1, b2_x1), torch.max(b1_x2, b2_x2)
         c_y1, c_y2 = torch.min(b1_y1, b2_y1), torch.max(b1_y2, b2_y2)
-        c_area = (c_x2 - c_x1) * (c_y2 - c_y1)  # convex area
+        c_area = (c_x2 - c_x1) * (c_y2 - c_y1) + 1e-16  # convex area
         return iou - (c_area - union_area) / c_area  # GIoU
 
     return iou
@@ -469,6 +461,12 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.5):
         class_conf, class_pred = pred[:, 5:].max(1)
         pred[:, 4] *= class_conf
 
+        # # Merge classes (optional)
+        # class_pred[(class_pred.view(-1,1) == torch.LongTensor([2, 3, 5, 6, 7]).view(1,-1)).any(1)] = 2
+        #
+        # # Remove classes (optional)
+        # pred[class_pred != 2, 4] = 0.0
+
         # Select only suitable predictions
         i = (pred[:, 4] > conf_thres) & (pred[:, 2:4] > min_wh).all(1) & torch.isfinite(pred).all(1)
         pred = pred[i]
@@ -568,9 +566,11 @@ def print_model_biases(model):
     multi_gpu = type(model) in (nn.parallel.DataParallel, nn.parallel.DistributedDataParallel)
     for l in model.yolo_layers:  # print pretrained biases
         if multi_gpu:
-            b = model.module.module_list[l - 1][0].bias.view(3, -1)  # bias 3x85
+            na = model.module.module_list[l].na  # number of anchors
+            b = model.module.module_list[l - 1][0].bias.view(na, -1)  # bias 3x85
         else:
-            b = model.module_list[l - 1][0].bias.view(3, -1)  # bias 3x85
+            na = model.module_list[l].na
+            b = model.module_list[l - 1][0].bias.view(na, -1)  # bias 3x85
         print('regression: %5.2f+/-%-5.2f ' % (b[:, :4].mean(), b[:, :4].std()),
               'objectness: %5.2f+/-%-5.2f ' % (b[:, 4].mean(), b[:, 4].std()),
               'classification: %5.2f+/-%-5.2f' % (b[:, 5:].mean(), b[:, 5:].std()))
@@ -624,6 +624,29 @@ def select_best_evolve(path='evolve*.txt'):  # from utils.utils import *; select
         print(file, x[fitness(x).argmax()])
 
 
+def crop_images_random(path='../images/', scale=0.50):  # from utils.utils import *; crop_images_random()
+    # crops images into random squares up to scale fraction
+    # WARNING: overwrites images!
+    for file in tqdm(sorted(glob.glob('%s/*.*' % path))):
+        img = cv2.imread(file)  # BGR
+        if img is not None:
+            h, w = img.shape[:2]
+
+            # create random mask
+            a = 30  # minimum size (pixels)
+            mask_h = random.randint(a, int(max(a, h * scale)))  # mask height
+            mask_w = mask_h  # mask width
+
+            # box
+            xmin = max(0, random.randint(0, w) - mask_w // 2)
+            ymin = max(0, random.randint(0, h) - mask_h // 2)
+            xmax = min(w, xmin + mask_w)
+            ymax = min(h, ymin + mask_h)
+
+            # apply random color mask
+            cv2.imwrite(file, img[ymin:ymax, xmin:xmax])
+
+
 def coco_single_class_labels(path='../coco/labels/train2014/', label_class=43):
     # Makes single-class coco datasets. from utils.utils import *; coco_single_class_labels()
     if os.path.exists('new/'):
@@ -652,7 +675,7 @@ def kmeans_targets(path='../coco/trainvalno5k.txt', n=9, img_size=416):  # from 
     from scipy import cluster
 
     # Get label wh
-    dataset = LoadImagesAndLabels(path, augment=True, rect=True)
+    dataset = LoadImagesAndLabels(path, augment=True, rect=True, cache_labels=True)
     for s, l in zip(dataset.shapes, dataset.labels):
         l[:, [1, 3]] *= s[0]  # normalized to pixels
         l[:, [2, 4]] *= s[1]
@@ -666,8 +689,7 @@ def kmeans_targets(path='../coco/trainvalno5k.txt', n=9, img_size=416):  # from 
     # Measure IoUs
     iou = torch.stack([wh_iou(torch.Tensor(wh).T, torch.Tensor(x).T) for x in k], 0)
     biou = iou.max(0)[0]  # closest anchor IoU
-
-    print((biou < 0.2635).float().mean())
+    print('Best possible recall: %.3f' % (biou > 0.2635).float().mean())  # BPR (best possible recall)
 
     # Print
     print('kmeans anchors (n=%g, img_size=%g, IoU=%.2f/%.2f/%.2f-min/mean/best): ' %
@@ -839,7 +861,7 @@ def plot_results(start=0, stop=0):  # from utils.utils import *; plot_results()
                 ax[i].get_shared_y_axes().join(ax[i], ax[i - 5])
 
     fig.tight_layout()
-    ax[0].legend()
+    ax[1].legend()
     fig.savefig('results.png', dpi=200)
 
 

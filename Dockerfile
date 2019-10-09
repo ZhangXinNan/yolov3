@@ -38,7 +38,8 @@ COPY . /usr/src/app
 # Copy weights
 #RUN python3 -c "from utils.google_utils import *; \
 #    gdrive_download(id='18xqvs_uwAqfTXp-LJCYLYNHBOcrwbrp0', name='weights/darknet53.conv.74'); \
-#    gdrive_download(id='1oPCHKsM2JpM-zgyepQciGli9X0MTsJCO', name='weights/yolov3-spp.weights')"
+#    gdrive_download(id='1oPCHKsM2JpM-zgyepQciGli9X0MTsJCO', name='weights/yolov3-spp.weights'); \
+#    gdrive_download(id='1vFlbJ_dXPvtwaLLOu-twnjK4exdFiQ73', name='weights/yolov3-spp.pt)"
 
 
 # ---------------------------------------------------  Extras Below  ---------------------------------------------------
@@ -53,6 +54,9 @@ COPY . /usr/src/app
 
 # Run with local directory access
 # sudo nvidia-docker run --ipc=host --mount type=bind,source="$(pwd)"/coco,target=/usr/src/coco ultralytics/yolov3:v0 python3 train.py
+
+# Pull and Run with local directory access
+# export tag=ultralytics/yolov3:v0 && sudo docker pull $tag && sudo nvidia-docker run --ipc=host --mount type=bind,source="$(pwd)"/coco,target=/usr/src/coco $tag python3 train.py
 
 # Build and Push
 # export tag=ultralytics/yolov3:v0 && sudo docker build -t $tag . && docker push $tag

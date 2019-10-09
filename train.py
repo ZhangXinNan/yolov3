@@ -15,6 +15,11 @@ try:  # Mixed precision training https://github.com/NVIDIA/apex
 except:
     mixed_precision = False  # not installed
 
+wdir = 'weights' + os.sep  # weights dir
+last = wdir + 'last.pt'
+best = wdir + 'best.pt'
+results_file = 'results.txt'
+
 # Hyperparameters (j-series, 50.5 mAP yolov3-320) evolved by @ktian08 https://github.com/ultralytics/yolov3/issues/310
 hyp = {'giou': 1.582,  # giou loss gain
        'cls': 27.76,  # cls loss gain  (CE=~1.0, uCE=~20)
@@ -27,6 +32,7 @@ hyp = {'giou': 1.582,  # giou loss gain
        'momentum': 0.97,  # SGD momentum
        'weight_decay': 0.0004569,  # optimizer weight decay
        'fl_gamma': 0.5,  # focal loss gamma
+       'hsv_h': 0.01,  # image HSV-Hue augmentation (fraction)
        'hsv_s': 0.5703,  # image HSV-Saturation augmentation (fraction)
        'hsv_v': 0.3174,  # image HSV-Value augmentation (fraction)
        'degrees': 1.113,  # image rotation (+/- deg)
@@ -56,9 +62,6 @@ def train():
 
     # Initialize
     init_seeds()
-    wdir = 'weights' + os.sep  # weights dir
-    last = wdir + 'last.pt'
-    best = wdir + 'best.pt'
     multi_scale = opt.multi_scale
 
     if multi_scale:
@@ -73,7 +76,7 @@ def train():
     nc = int(data_dict['classes'])  # number of classes
 
     # Remove previous results
-    for f in glob.glob('*_batch*.jpg') + glob.glob('results.txt'):
+    for f in glob.glob('*_batch*.jpg') + glob.glob(results_file):
         os.remove(f)
 
     # Initialize model
@@ -98,6 +101,7 @@ def train():
     cutoff = -1  # backbone reaches to cutoff layer
     start_epoch = 0
     best_fitness = 0.
+    attempt_download(weights)
     if weights.endswith('.pt'):  # pytorch format
         # possible weights are 'last.pt', 'yolov3-spp.pt', 'yolov3-tiny.pt' etc.
         if opt.bucket:
@@ -105,11 +109,11 @@ def train():
         chkpt = torch.load(weights, map_location=device)
 
         # load model
-        if opt.transfer:
-            chkpt['model'] = {k: v for k, v in chkpt['model'].items() if model.state_dict()[k].numel() == v.numel()}
-            model.load_state_dict(chkpt['model'], strict=False)
-        else:
-            model.load_state_dict(chkpt['model'])
+        # if opt.transfer:
+        chkpt['model'] = {k: v for k, v in chkpt['model'].items() if model.state_dict()[k].numel() == v.numel()}
+        model.load_state_dict(chkpt['model'], strict=False)
+        # else:
+        #    model.load_state_dict(chkpt['model'])
 
         # load optimizer
         if chkpt['optimizer'] is not None:
@@ -118,7 +122,7 @@ def train():
 
         # load results
         if chkpt.get('training_results') is not None:
-            with open('results.txt', 'w') as file:
+            with open(results_file, 'w') as file:
                 file.write(chkpt['training_results'])  # write results.txt
 
         start_epoch = chkpt['epoch'] + 1
@@ -131,11 +135,12 @@ def train():
     if opt.transfer or opt.prebias:  # transfer learning edge (yolo) layers
         nf = int(model.module_defs[model.yolo_layers[0] - 1]['filters'])  # yolo layer size (i.e. 255)
 
-        for p in optimizer.param_groups:
-            # lower param count allows more aggressive training settings: i.e. SGD ~0.1 lr0, ~0.9 momentum
-            p['lr'] *= 100
-            if p.get('momentum') is not None:  # for SGD but not Adam
-                p['momentum'] *= 0.9
+        if opt.prebias:
+            for p in optimizer.param_groups:
+                # lower param count allows more aggressive training settings: i.e. SGD ~0.1 lr0, ~0.9 momentum
+                p['lr'] *= 100  # lr gain
+                if p.get('momentum') is not None:  # for SGD but not Adam
+                    p['momentum'] *= 0.9
 
         for p in model.parameters():
             if opt.prebias and p.numel() == nf:  # train (yolo biases)
@@ -150,6 +155,7 @@ def train():
     # lf = lambda x: 10 ** (hyp['lrf'] * x / epochs)  # exp ramp
     # lf = lambda x: 1 - 10 ** (hyp['lrf'] * (1 - x / epochs))  # inverse exp ramp
     # scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=range(59, 70, 1), gamma=0.8)  # gradual fall to 0.1*lr0
     scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[round(opt.epochs * x) for x in [0.8, 0.9]], gamma=0.1)
     scheduler.last_epoch = start_epoch - 1
 
@@ -191,7 +197,7 @@ def train():
     # Dataloader
     dataloader = torch.utils.data.DataLoader(dataset,
                                              batch_size=batch_size,
-                                             num_workers=min(os.cpu_count(), batch_size),
+                                             num_workers=min([os.cpu_count(), batch_size, 16]),
                                              shuffle=not opt.rect,  # Shuffle=True unless rectangular training is used
                                              pin_memory=True,
                                              collate_fn=dataset.collate_fn)
@@ -201,7 +207,7 @@ def train():
     model.arc = opt.arc  # attach yolo architecture
     model.hyp = hyp  # attach hyperparameters to model
     # model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
-    model_info(model, report='summary')  # 'full' or 'summary'
+    torch_utils.model_info(model, report='summary')  # 'full' or 'summary'
     nb = len(dataloader)
     maps = np.zeros(nc)  # mAP per class
     results = (0, 0, 0, 0, 0, 0, 0)  # 'P', 'R', 'mAP', 'F1', 'val GIoU', 'val Objectness', 'val Classification'
@@ -311,8 +317,8 @@ def train():
                                               save_json=final_epoch and epoch > 0 and 'coco.data' in data)
 
         # Write epoch results
-        with open('results.txt', 'a') as file:
-            file.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
+        with open(results_file, 'a') as f:
+            f.write(s + '%10.3g' * 7 % results + '\n')  # P, R, mAP, F1, test_losses=(GIoU, obj, cls)
 
         # Write Tensorboard results
         if tb_writer:
@@ -330,11 +336,11 @@ def train():
         # Save training results
         save = (not opt.nosave) or (final_epoch and not opt.evolve) or opt.prebias
         if save:
-            with open('results.txt', 'r') as file:
+            with open(results_file, 'r') as f:
                 # Create checkpoint
                 chkpt = {'epoch': epoch,
                          'best_fitness': best_fitness,
-                         'training_results': file.read(),
+                         'training_results': f.read(),
                          'model': model.module.state_dict() if type(
                              model) is nn.parallel.DistributedDataParallel else model.state_dict(),
                          'optimizer': None if final_epoch else optimizer.state_dict()}
@@ -367,6 +373,15 @@ def train():
     return results
 
 
+def prebias():
+    # trains output bias layers for 1 epoch and creates new backbone
+    if opt.prebias:
+        train()  # transfer-learn yolo biases for 1 epoch
+        create_backbone(last)  # saved results as backbone.pt
+        opt.weights = wdir + 'backbone.pt'  # assign backbone
+        opt.prebias = False  # disable prebias
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--epochs', type=int, default=273)  # 500200 batches at bs 16, 117263 images = 273 epochs
@@ -393,17 +408,11 @@ if __name__ == '__main__':
     parser.add_argument('--adam', action='store_true', help='use adam optimizer')
     parser.add_argument('--var', type=float, help='debug variable')
     opt = parser.parse_args()
-    opt.weights = 'weights/last.pt' if opt.resume else opt.weights
+    opt.weights = last if opt.resume else opt.weights
     print(opt)
     device = torch_utils.select_device(opt.device, apex=mixed_precision)
 
     tb_writer = None
-    if opt.prebias:
-        train()  # transfer-learn yolo biases for 1 epoch
-        create_backbone('weights/last.pt')  # saved results as backbone.pt
-        opt.weights = 'weights/backbone.pt'  # assign backbone
-        opt.prebias = False  # disable prebias
-
     if not opt.evolve:  # Train normally
         try:
             # Start Tensorboard with "tensorboard --logdir=runs", view at http://localhost:6006/
@@ -413,6 +422,7 @@ if __name__ == '__main__':
         except:
             pass
 
+        prebias()  # optional
         train()  # train normally
 
     else:  # Evolve hyperparameters (optional)
@@ -423,15 +433,22 @@ if __name__ == '__main__':
 
         for _ in range(1):  # generations to evolve
             if os.path.exists('evolve.txt'):  # if evolve.txt exists: select best hyps and mutate
-                # Get best hyperparameters
+                # Select parent(s)
                 x = np.loadtxt('evolve.txt', ndmin=2)
-                x = x[fitness(x).argmax()]  # select best fitness hyps
+                parent = 'weighted'  # parent selection method: 'single' or 'weighted'
+                if parent == 'single' or len(x) == 1:
+                    x = x[fitness(x).argmax()]
+                elif parent == 'weighted':  # weighted combination
+                    n = min(10, x.shape[0])  # number to merge
+                    x = x[np.argsort(-fitness(x))][:n]  # top n mutations
+                    w = fitness(x) - fitness(x).min()  # weights
+                    x = (x[:n] * w.reshape(n, 1)).sum(0) / w.sum()  # new parent
                 for i, k in enumerate(hyp.keys()):
                     hyp[k] = x[i + 7]
 
                 # Mutate
-                init_seeds(seed=int(time.time()))
-                s = [.20, .20, .20, .20, .20, .20, .20, .00, .02, .20, .20, .20, .20, .20, .20, .20, .20]  # sigmas
+                np.random.seed(int(time.time()))
+                s = [.2, .2, .2, .2, .2, .2, .2, .0, .02, .2, .2, .2, .2, .2, .2, .2, .2, .2]  # sigmas
                 for i, k in enumerate(hyp.keys()):
                     x = (np.random.randn(1) * s[i] + 1) ** 2.0  # plt.hist(x.ravel(), 300)
                     hyp[k] *= float(x)  # vary by sigmas
@@ -443,6 +460,7 @@ if __name__ == '__main__':
                 hyp[k] = np.clip(hyp[k], v[0], v[1])
 
             # Train mutation
+            prebias()
             results = train()
 
             # Write mutation results
